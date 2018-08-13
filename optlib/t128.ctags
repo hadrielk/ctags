@@ -1,0 +1,173 @@
+#
+# A universal-ctags options file for 128 Technology source code tagging. 
+#
+# The basic purpose of this ctags file is to tag the following in our
+# C++ code base:
+#
+#  1. Google-test code, so that TEST(TestCase, TestName) becomes
+#     a tag of 'TestCase.TestName', since that is what their stdout
+#     and filters use to identify the tests. The same goes for TEST_F()
+#     and TEST_P() though not currently TYPED_TEST().
+#
+#  2. Google-mock mocked methods as function tags, so that their
+#     'MOCK_METHOD0(funcName, void());'' style macro usage generates a tag
+#     for the mock-generated function 'funcName()'.
+#
+#  3. The pièce de résistance: enums we generate from ENUM_FACTORY macros.
+#     In our C++ code we use boost-preprocessor-inspired macros such as this:
+#
+#       ENUM_FACTORY_DECLARE_ENUM(State,
+#           ((First))
+#           ((Second))
+#           ((Third))
+#       );
+#
+#     These generate a C++ enum class 'State' with the listed enumerators.
+#     It also generates their stringified names, iterators, etc. and provides
+#     functions for accessing/converting those, as well as serialization, etc.
+#     Much of that involves a second generated C++ class with the enum's name
+#     followed by 'Traits' (so 'StateTraits' in the above example). Various
+#     forms of this macro exist to handle specifying additional data, but they
+#     all follow this concept and begin with ENUM_FACTORY_DECLARE_ENUM.
+#
+#     To handle this, universal-ctags' experimental multi-table regex feature is
+#     used. Much effort was put in to reduce the performance impact of it,
+#     so that ctags code generating only increased by a few seconds across
+#     the whole code base.
+#
+
+# make the normal ctags CPreProcessor ignore these googletest macros:
+-D TEST_P
+-D TEST_F
+-D TYPED_TEST
+-D TEST
+
+# don't tag anonymous functions/namespaces - I have no idea why ctags does this
+# by *default*, as it's a complete waste of time+space, imho... seriously, the
+# tag names they generate are not usable for lookup, and the only other purpose
+# they would serve is for scoping variables defined in lambda functions; but if
+# your lambda function is so big you need to lookup a variable definition while
+# you're *inside* it, you're doing it wrong :-P
+--extras=-{anonymous}
+
+
+#####################################################################
+# to reduce performance impact, we split up processing of cpp vs. hpp files,
+# since we generally don't care about enums or mock methods declared/defined
+# in cpp files, and this helps performance a lot
+
+# create a new "language" for cpp files, based on C++
+--langdef=T128cpp{base=C++}{dedicated}
+--kinddef-T128cpp=y,test,google tests
+--kinddef-T128cpp=i,fIxture,google fIxture tests
+--kinddef-T128cpp=a,pArameterized,google pArameterized tests
+--map-C++=-.cpp
+--map-T128cpp=+.cpp
+
+# Define tag locations for google tests, formatted the way the test names are output
+# to stdout by googletest
+--regex-T128cpp=/^TEST\([ \t]*([^,]+),[ \t]*([^ \t\)]+)[ \t]*\)/\1.\2/y/{exclusive}
+--regex-T128cpp=/^TEST_F\([ \t]*([^,]+),[ \t]*([^ \t\)]+)[ \t]*\)/\1.\2/i/{exclusive}
+--regex-T128cpp=/^TEST_P\([ \t]*([^,]+),[ \t]*([^ \t\)]+)[ \t]*\)/\1.\2/a/
+# should we do one for TYPED_TEST?
+
+
+#####################################################################
+# and now for hpp...
+
+# create a new "language" for hpp files, based on C++
+--langdef=T128hpp{base=C++}{dedicated}
+--kinddef-T128hpp=c,class,classes
+--kinddef-T128hpp=g,enum,enumerations
+--kinddef-T128hpp=e,enumerator,enumerators
+--kinddef-T128hpp=f,function,functions
+--map-C++=-.hpp
+--map-T128hpp=+.hpp
+
+# define tag locations for mocked functions
+--regex-T128hpp=/MOCK_METHOD[0-9]\(([^,]+),/\1/f/
+
+
+#####################################################################
+# and now, we use experimental features to parse enum factory stuff in hpp files
+# first declare our tables:
+--_tabledef-T128hpp=ours
+--_tabledef-T128hpp=main
+--_tabledef-T128hpp=enum_traits
+--_tabledef-T128hpp=enum_declare
+--_tabledef-T128hpp=enumerators
+
+# this table is checked first per source file - if our copyright isn't found at the
+# top, then the whole rest of the source file is not checked further
+# this cuts performance impact by half, since half our code is third-party
+--_mtable-regex-T128hpp=ours/\/\*{69}\n \* Copyright \(c\) [0-9]{4}(-[0-9]{4})? 128 Technology, Inc\.\n \* All rights reserved.\n \*{68}\/\n+//{tenter=main}
+--_mtable-regex-T128hpp=ours/\/\* Copyright 20[1-9][0-9] 128 Technology, Inc\. \*\/\n+//{tenter=main}
+
+
+# assuming the source file has our copyright, this next table is the "main" one
+# for the rest of the file; this table is extremely important for performance,
+# because ctags will spend most of its time in here. Since ctags starts at the
+# top of the table each iteration, we check for our macro there, which will fail
+# most of the time. (well , actually the first regex captures things starting
+# with 'E' that are *not* our macro, but I'll discuss more about that later) It
+# will then move on to the second regex, capture the character, *and all other
+# characters other than 'E'. That's massively more efficient than doing
+# '--_mtable-regex- T128hpp=main/.//' and only capturing one character.
+#
+# The last regex quits if there's nothing left in the file - this is a very
+# minor optimization, because ctags would just auto-pop back to the 'main'
+# table, try the copyright regex patterns, fail at those, and then finally quit;
+# so we just quit here to save the time, but really it's trivial in the grand
+# scheme of things.
+#
+# One would think it would be more efficient to add the following line
+# at the top of this table:
+#
+#   --_mtable-regex-T128hpp=toplevel/[^E]+//
+#
+# instead of this one:
+#
+#   --_mtable-regex-T128hpp=toplevel/(E[^N][^E]+)+//
+#
+# ...but it's actually worse. Why? because think of what happens *most* of the
+# time. Usually, there are 'E' characters in the code, but not for our macro. So
+# the very first time this table begins it will match the hypothetical /[^E]+//
+# regex if it were in the table at the top, and grab everything in the file up
+# to the first 'E' it hits. Then it would try that regex again, fail it, and try
+# the macro one. Most of the time that will fail too, so it will go to the next
+# regex line with '/.[^E]*//', and it will match. That's good! But it will match
+# and grab everything in the file up to the next 'E'. Then ctags will go back to
+# the top of the table and try the hypothetical '/[^E]+//' regex again, and it
+# will fail, so then it will try the macro regex and again usually fail, and go
+# to the second-to-last '/.[^E]*//' regex again and match. Rinse and repeat. So
+# effectively what would happen is we'd be optimizing for the very first capture
+# in the file, but then making it worse from then on in the file, because it
+# will *always* fail to match the hypothetical '/[^E]+//' regex from then on in
+# the file. Making ctags do more work is bad. In fact, adding that hypothetical
+# regex increases the run time by ~30%!
+#
+# Instead we take the opposite approach: have it fail to match at the beginning
+# of the file, but then match frequently from then on. Because the odds are that
+# the 'E' the second-to-last /.[^E]*// regex did not grab is *not* for our
+# macro. And doing it this way saves a lot of runtime.
+#
+--_mtable-regex-T128hpp=toplevel/(E[^N][^E]+)+//
+--_mtable-regex-T128hpp=main/ENUM_FACTORY_DECLARE_ENUM(_STRING)?\(//{tenter=enum_traits}
+--_mtable-regex-T128hpp=main/.[^E]*//
+--_mtable-regex-T128hpp=main///{tquit}
+
+# this does not advance, so we can generate *two* tags for the same line:
+# one for the EnumTraits class tag here, and then one for the enum class after
+--_mtable-regex-T128hpp=enum_traits/[ \t\n]*([^,]+),/\1Traits/c/{mgroup=1}{tjump=enum_declare}{_advanceTo=1start}
+
+# now generate the actual enum
+--_mtable-regex-T128hpp=enum_declare/([^,]+),/\1/g/{mgroup=1}{tjump=enumerators}{scope=push}
+
+# most enum factory declarations use double-parenthesis for the enumerators - we only handle those
+# note that the leading `[ \t\n]*` whitespace skipper can lead to nasty backtracking,
+# but in our code base this actually improves performance a tiny bit
+--_mtable-regex-T128hpp=enumerators/[ \t\n]*\(\( *([^, \)]+)[^\)]*\)\)/\1/e/{mgroup=1}{scope=ref}
+--_mtable-regex-T128hpp=enumerators/[ \t\n]*\);//{tleave}{scope=pop}
+# ignore tokens not in parenthesis:
+--_mtable-regex-T128hpp=enumerators/[ \t\n]*[a-zA-Z][a-zA-Z0-9:_]+,//
+--_mtable-regex-T128hpp=enumerators/.[ \t\n]*//
